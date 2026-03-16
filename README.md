@@ -20,6 +20,8 @@ To use it, set the relay URL before starting Remodex:
 REMODEX_RELAY="wss://relay.owo.nz/relay" remodex up
 ```
 
+> **Note:** Using a public relay means all your messages pass through a third-party server. Although Remodex encrypts all application payloads end-to-end (AES-256-GCM with X25519 + HKDF-SHA256) and the relay cannot decrypt your conversation content, we strongly recommend self-hosting your own relay for maximum privacy.
+
 ## Self-Hosting
 
 ### Docker (Recommended)
