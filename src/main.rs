@@ -26,17 +26,10 @@ async fn main() {
 
     let (app, _state) = create_app(enable_push_service, trust_proxy, false);
 
-    let bind_host = std::env::var("REMODEX_RELAY_BIND_HOST")
-        .ok()
-        .and_then(|v| {
-            let trimmed = v.trim().to_string();
-            if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed)
-            }
-        })
-        .unwrap_or_else(|| "127.0.0.1".to_string());
+    // REMODEX_RELAY_BIND_HOST in compose.yaml is for the host-side port mapping,
+    // not for the app's listen address. The app should bind to 0.0.0.0 by default
+    // (matching Node.js server.listen(port) behavior) so Docker networking works.
+    let bind_host = "0.0.0.0".to_string();
 
     let addr: SocketAddr = format!("{}:{}", bind_host, port)
         .parse()
