@@ -10,10 +10,12 @@ use tokio::sync::Mutex;
 
 const CLEANUP_DELAY_MS: u64 = 60_000;
 const HEARTBEAT_INTERVAL_MS: u64 = 30_000;
+const MAC_ABSENCE_GRACE_MS: u64 = 15_000;
 const CLOSE_CODE_INVALID: u16 = 4000;
 const CLOSE_CODE_MAC_REPLACED: u16 = 4001;
 const CLOSE_CODE_SESSION_UNAVAILABLE: u16 = 4002;
 const CLOSE_CODE_IPHONE_REPLACED: u16 = 4003;
+const CLOSE_CODE_MAC_ABSENCE_BUFFER_FULL: u16 = 4004;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Role {
@@ -58,6 +60,7 @@ struct Session {
     mac: Option<ClientHandle>,
     clients: HashMap<ClientId, ClientHandle>,
     cleanup_timer: Option<tokio::task::JoinHandle<()>>,
+    mac_absence_timer: Option<tokio::task::JoinHandle<()>>,
     notification_secret: Option<String>,
 }
 
@@ -220,6 +223,7 @@ pub async fn handle_ws_connection(
                     mac: None,
                     clients: HashMap::new(),
                     cleanup_timer: None,
+                    mac_absence_timer: None,
                     notification_secret: None,
                 },
             );
@@ -227,8 +231,11 @@ pub async fn handle_ws_connection(
 
         let session = sessions.get_mut(&session_id_trimmed).unwrap();
 
-        // iPhone requires active Mac
-        if role == Role::Iphone && session.mac.is_none() {
+        // iPhone requires active Mac or an active mac-absence grace window
+        if role == Role::Iphone
+            && session.mac.is_none()
+            && session.mac_absence_timer.is_none()
+        {
             drop(sessions);
             let (mut sink, _) = socket.split();
             let _ = sink
@@ -247,6 +254,11 @@ pub async fn handle_ws_connection(
 
         match role {
             Role::Mac => {
+                // Clear mac absence timer if Mac reconnects during grace period
+                if let Some(timer) = session.mac_absence_timer.take() {
+                    timer.abort();
+                }
+
                 session.notification_secret = notification_secret
                     .as_deref()
                     .and_then(|s| {
@@ -358,6 +370,11 @@ pub async fn handle_ws_connection(
                         Role::Iphone => {
                             if let Some(mac) = &session.mac {
                                 let _ = mac.tx.send(ClientMessage::Text(text.to_string()));
+                            } else {
+                                let _ = handle.tx.send(ClientMessage::Close(
+                                    CLOSE_CODE_MAC_ABSENCE_BUFFER_FULL,
+                                    "Mac temporarily unavailable".to_string(),
+                                ));
                             }
                         }
                     }
@@ -376,6 +393,11 @@ pub async fn handle_ws_connection(
                         Role::Iphone => {
                             if let Some(mac) = &session.mac {
                                 let _ = mac.tx.send(ClientMessage::Text(text.clone()));
+                            } else {
+                                let _ = handle.tx.send(ClientMessage::Close(
+                                    CLOSE_CODE_MAC_ABSENCE_BUFFER_FULL,
+                                    "Mac temporarily unavailable".to_string(),
+                                ));
                             }
                         }
                     }
@@ -404,17 +426,45 @@ pub async fn handle_ws_connection(
                 Role::Mac => {
                     if session.mac.as_ref().is_some_and(|m| m.id == client_id) {
                         session.mac = None;
-                        session.notification_secret = None;
                         tracing::info!(
                             "[relay] Mac disconnected -> {}",
                             relay_session_log_label(&session_id_trimmed)
                         );
-                        // Close all iPhone clients
-                        for client in session.clients.values() {
-                            let _ = client.tx.send(ClientMessage::Close(
-                                CLOSE_CODE_SESSION_UNAVAILABLE,
-                                "Mac disconnected".to_string(),
-                            ));
+
+                        if !session.clients.is_empty() {
+                            // Start mac absence grace period instead of immediately closing iPhones.
+                            // iPhone can rejoin or keep sending during this window.
+                            if session.mac_absence_timer.is_none() {
+                                let state_clone = state.clone();
+                                let sid = session_id_trimmed.clone();
+                                session.mac_absence_timer =
+                                    Some(tokio::spawn(async move {
+                                        tokio::time::sleep(Duration::from_millis(
+                                            MAC_ABSENCE_GRACE_MS,
+                                        ))
+                                        .await;
+                                        let mut sessions = state_clone.sessions.lock().await;
+                                        if let Some(session) = sessions.get_mut(&sid) {
+                                            session.mac_absence_timer = None;
+                                            session.notification_secret = None;
+                                            // Close all iPhone clients after grace period expires
+                                            for client in session.clients.values() {
+                                                let _ = client.tx.send(ClientMessage::Close(
+                                                    CLOSE_CODE_SESSION_UNAVAILABLE,
+                                                    "Mac disconnected".to_string(),
+                                                ));
+                                            }
+                                            // Schedule cleanup
+                                            schedule_cleanup(&state_clone, &sid, session);
+                                        }
+                                    }));
+                                // Cancel cleanup timer while grace period is active
+                                if let Some(timer) = session.cleanup_timer.take() {
+                                    timer.abort();
+                                }
+                            }
+                        } else {
+                            session.notification_secret = None;
                         }
                     }
                 }
@@ -428,25 +478,34 @@ pub async fn handle_ws_connection(
                 }
             }
 
-            // Schedule cleanup if session is empty
-            if session.mac.is_none() && session.clients.is_empty() && session.cleanup_timer.is_none()
-            {
-                let state_clone = state.clone();
-                let sid = session_id_trimmed.clone();
-                session.cleanup_timer = Some(tokio::spawn(async move {
-                    tokio::time::sleep(Duration::from_millis(CLEANUP_DELAY_MS)).await;
-                    let mut sessions = state_clone.sessions.lock().await;
-                    if let Some(session) = sessions.get(&sid) {
-                        if session.mac.is_none() && session.clients.is_empty() {
-                            sessions.remove(&sid);
-                            tracing::info!(
-                                "[relay] {} cleaned up",
-                                relay_session_log_label(&sid)
-                            );
-                        }
-                    }
-                }));
-            }
+            // Schedule cleanup if session is empty and no grace timer active
+            schedule_cleanup(&state, &session_id_trimmed, session);
         }
     }
+}
+
+fn schedule_cleanup(state: &Arc<RelayState>, session_id: &str, session: &mut Session) {
+    if session.mac.is_some()
+        || !session.clients.is_empty()
+        || session.cleanup_timer.is_some()
+        || session.mac_absence_timer.is_some()
+    {
+        return;
+    }
+
+    let state_clone = state.clone();
+    let sid = session_id.to_string();
+    session.cleanup_timer = Some(tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(CLEANUP_DELAY_MS)).await;
+        let mut sessions = state_clone.sessions.lock().await;
+        if let Some(session) = sessions.get(&sid) {
+            if session.mac.is_none()
+                && session.clients.is_empty()
+                && session.mac_absence_timer.is_none()
+            {
+                sessions.remove(&sid);
+                tracing::info!("[relay] {} cleaned up", relay_session_log_label(&sid));
+            }
+        }
+    }));
 }
